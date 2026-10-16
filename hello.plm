@@ -1,0 +1,103 @@
+/* SMSHELLO.PLM - "Hello, world!" for the Sega Master System, in PL/M-80.
+ *
+ * Follows lajohnston/smslib example 01-helloWorld, now ON TOP of the
+ * vdp.plm library instead of raw port writes (the first version of this
+ * file did every VDP access inline; this is the library port).
+ *
+ *   smslib init                     -> CPU starts at 0, stack at DFF0H
+ *                                      (the smsheader build puts data and
+ *                                      stack in work RAM)
+ *   vdpSettings.init                -> CALL VDPINIT (display OFF; same
+ *                                      smslib default register block)
+ *   palette.setIndex(0)+write       -> CALL VDPSETCRAMW(0), 2 colors
+ *                                      (--bbggrr: 0 black, 63 white)
+ *   patterns.setIndex(0)+write      -> CALL VDPSETVRAMW(0), 320 bytes
+ *   tilemap.setColRow+write         -> CALL VDPWRITETILE per tile at
+ *                                      row 0, cols 0-12 (each call sets
+ *                                      its own VRAM cursor and writes
+ *                                      index + attribute 0)
+ *   vdpSettings.enableDisplay       -> CALL VDPDISPLAYON (reg1 A0H ->
+ *                                      E0H, same as the old final write)
+ *   halt                            -> DO WHILE 1 loop (no PL/M HALT)
+ *
+ * The old inline version carried a warning about computed command bytes
+ * (128 + R) miscompiling after array accesses; it is obsolete here --
+ * the library procedures keep their cursors in locals and every library
+ * build has been audited at the asm level.
+ *
+ * SMS tiles are 8x8 pixels x 4 bits, 32 bytes: 8 rows of 4 bytes, one
+ * byte per bitplane, MSB = leftmost pixel.  Only bitplane 0 is used, so
+ * pixels are palette index 0 (black) or 1 (white); each glyph row is
+ * "mask,0,0,0".
+ *
+ * Glyph order: 0=H 1=e 2=l 3=o 4=',' 5=space 6=w 7=r 8=d 9='!'
+ * "Hello, world!" = 0,1,2,2,3,4,5,6,3,7,2,8,9.
+ *
+ * Build:
+ *   ./plm80c smshello.plm 'org(0)' smsheader
+ *   z80asm -o smshello.sms smshello.asm   (exactly 32768 bytes)
+ */
+SMSHELLO: DO;
+DECLARE I ADDRESS;
+DECLARE J BYTE;
+
+/* CRAM palette: index 0 = black, index 1 = white (--bbggrr). */
+DECLARE PAL(2) BYTE INITIAL (0, 63);
+
+/* 10 glyphs x 32 bytes = 320 bytes of pattern data for VRAM $0000. */
+DECLARE FONT(320) BYTE INITIAL (
+/* H */ 136,0,0,0, 136,0,0,0, 136,0,0,0, 248,0,0,0,
+        136,0,0,0, 136,0,0,0, 136,0,0,0, 0,0,0,0,
+/* e */ 0,0,0,0, 56,0,0,0, 136,0,0,0, 248,0,0,0,
+        128,0,0,0, 136,0,0,0, 56,0,0,0, 0,0,0,0,
+/* l */ 128,0,0,0, 128,0,0,0, 128,0,0,0, 128,0,0,0,
+        128,0,0,0, 128,0,0,0, 128,0,0,0, 0,0,0,0,
+/* o */ 0,0,0,0, 56,0,0,0, 136,0,0,0, 136,0,0,0,
+        136,0,0,0, 56,0,0,0, 0,0,0,0, 0,0,0,0,
+/* , */ 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+        0,0,0,0, 48,0,0,0, 32,0,0,0, 64,0,0,0,
+/* sp */ 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+        0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+/* w */ 0,0,0,0, 0,0,0,0, 136,0,0,0, 136,0,0,0,
+        168,0,0,0, 168,0,0,0, 80,0,0,0, 0,0,0,0,
+/* r */ 0,0,0,0, 176,0,0,0, 192,0,0,0, 128,0,0,0,
+        128,0,0,0, 128,0,0,0, 0,0,0,0, 0,0,0,0,
+/* d */ 8,0,0,0, 8,0,0,0, 120,0,0,0, 136,0,0,0,
+        136,0,0,0, 136,0,0,0, 120,0,0,0, 0,0,0,0,
+/* ! */ 32,0,0,0, 32,0,0,0, 32,0,0,0, 32,0,0,0,
+        32,0,0,0, 0,0,0,0, 32,0,0,0, 0,0,0,0);
+
+/* "Hello, world!" as glyph numbers; attribute byte 0 written after. */
+DECLARE MSG(13) BYTE INITIAL (0, 1, 2, 2, 3, 4, 5, 6, 3, 7, 2, 8, 9);
+
+$INCLUDE ('vdp.plm')
+
+/* 1. VDP registers to smslib defaults, display OFF. */
+CALL VDPINIT;
+
+/* 2. Palette: CRAM write at index 0, then 2 colors. */
+CALL VDPSETCRAMW(0);
+OUTPUT(190) = PAL(0);
+OUTPUT(190) = PAL(1);
+
+/* 3. Patterns: VRAM write at $0000, then 320 font bytes. */
+CALL VDPSETVRAMW(0);
+DO I = 0 TO 319;
+  OUTPUT(190) = FONT(I);
+END;
+
+/* 4. Tilemap: 13 tiles at row 0, columns 0-12, attribute 0. */
+J = 0;
+DO WHILE J <> 13;
+  CALL VDPWRITETILE(J, 0, MSG(J), 0);
+  J = J + 1;
+END;
+
+/* 5. Enable display: reg1 A0H -> E0H. */
+CALL VDPDISPLAYON;
+
+/* 6. Idle forever (asm HALT has no PL/M equivalent). */
+DO WHILE 1;
+END;
+
+END;
