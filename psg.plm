@@ -1,0 +1,98 @@
+/* PSG.PLM - SN76489 sound library for PL/M-80 (SMS, write port 127).
+ *
+ * Include from the main module, inside its DO block before any statements:
+ * $INCLUDE ('psg.plm')
+ * ($ must be in column 1. All names are PSG-prefixed to avoid clashes.)
+ *
+ * Hardware ref: smspower.org Development/SN76489. The chip is write-only.
+ *   latch byte %1cctdddd: cc = channel (0-2 tone, 3 noise),
+ *     t = type (0 tone/noise, 1 volume), dddd = 4 data bits.
+ *   tone: latch holds low 4 of 10-bit divider N, then a data byte
+ *     %00DDDDDD holds the high 6 bits. Pitch = clock / (32 * N);
+ *     clock = 3579545 Hz NTSC (3546893 PAL). N = 0/1 gives DC output.
+ *     Example: N = $FE (254) -> 440.4 Hz (A4) at NTSC.
+ *   volume latch %1cc1dddd: attenuation 0 (loudest) .. 15 (silent).
+ *   noise latch %1110ddd: bit2 = 1 white / 0 periodic, bits1-0 rate
+ *     (00 N/512, 01 N/1024, 10 N/2048, 11 = tone-ch-2 output).
+ * On SMS the chip resets to silence (volumes 15); CALL PSGSILENCE anyway.
+ *
+ * API:
+ *   CALL PSGSETVOL(ch, att);   channel 0-3, attenuation 0-15
+ *   CALL PSGMUTE(ch);          = SETVOL(ch, 15)
+ *   CALL PSGSILENCE;           mute all 4 channels
+ *   CALL PSGTONE(ch, lo, hi);  10-bit divider as low-4 + high-6 bits
+ *   CALL PSGNOTE(ch, n);       one-octave scale, n = 0-7 (A4..A5, NTSC)
+ *   CALL PSGNOISE(mode);       low 3 bits: mode + rate (see above)
+ */
+DECLARE PSGPORT LITERALLY '127';
+
+/* One-octave divider table (NTSC), stored as (low-4, high-6) byte pairs:
+   A4 B4 C5 D5 E5 F5 G5 A5 = N 254,227,214,191,170,160,143,127. */
+DECLARE PSGNOTEDATA(16) BYTE INITIAL (
+14, 15, 3, 14, 6, 13, 15, 11, 10, 10, 0, 10, 15, 8, 15, 7);
+
+/* Volume latch base is 144 + ch * 32, selected without multiplication. */
+PSGSETVOL: PROCEDURE (CH, ATT);
+DECLARE CH BYTE;
+DECLARE ATT BYTE;
+DECLARE L BYTE;
+IF CH = 0 THEN L = 144;
+ELSE IF CH = 1 THEN L = 176;
+ELSE IF CH = 2 THEN L = 208;
+ELSE L = 240;
+L = L + (ATT AND 15);
+OUTPUT(PSGPORT) = L;
+END PSGSETVOL;
+
+PSGMUTE: PROCEDURE (CH);
+DECLARE CH BYTE;
+CALL PSGSETVOL(CH, 15);
+END PSGMUTE;
+
+PSGSILENCE: PROCEDURE;
+CALL PSGMUTE(0);
+CALL PSGMUTE(1);
+CALL PSGMUTE(2);
+CALL PSGMUTE(3);
+END PSGSILENCE;
+
+/* Tone latch base is 128 + ch * 32; second byte carries high 6 bits. */
+PSGTONE: PROCEDURE (CH, DIVLO, DIVHI);
+DECLARE CH BYTE;
+DECLARE DIVLO BYTE;
+DECLARE DIVHI BYTE;
+DECLARE L BYTE;
+IF CH = 0 THEN L = 128;
+ELSE IF CH = 1 THEN L = 160;
+ELSE IF CH = 2 THEN L = 192;
+ELSE L = 224;
+L = L + (DIVLO AND 15);
+OUTPUT(PSGPORT) = L;
+OUTPUT(PSGPORT) = DIVHI AND 63;
+END PSGTONE;
+
+/* Named note from the octave table (index doubled with adds only). */
+PSGNOTE: PROCEDURE (CH, NOTE);
+DECLARE CH BYTE;
+DECLARE NOTE BYTE;
+DECLARE N BYTE;
+DECLARE J ADDRESS;
+DECLARE LO BYTE;
+DECLARE HI BYTE;
+IF NOTE > 7 THEN N = 7;
+ELSE N = NOTE;
+J = N;
+J = J + J;
+LO = PSGNOTEDATA(J);
+J = J + 1;
+HI = PSGNOTEDATA(J);
+CALL PSGTONE(CH, LO, HI);
+END PSGNOTE;
+
+/* Noise latch $E0 + 3 mode/rate bits. */
+PSGNOISE: PROCEDURE (MODE);
+DECLARE MODE BYTE;
+DECLARE L BYTE;
+L = 224 + (MODE AND 7);
+OUTPUT(PSGPORT) = L;
+END PSGNOISE;
