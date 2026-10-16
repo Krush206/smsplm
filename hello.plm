@@ -12,6 +12,11 @@
  *   palette.setIndex(0)+write       -> CALL VDPSETCRAMW(0), 2 colors
  *                                      (--bbggrr: 0 black, 63 white)
  *   patterns.setIndex(0)+write      -> CALL VDPSETVRAMW(0), 320 bytes
+ *   tilemap clear                   -> CALL VDPCLEARTILES(5, 0): fill the
+ *                                      whole 32x28 name table with the
+ *                                      blank glyph (tile 5) first, or
+ *                                      the unwritten cells show the 'H'
+ *                                      tile from power-on VRAM garbage
  *   tilemap.setColRow+write         -> CALL VDPWRITETILE per tile at
  *                                      row 0, cols 0-12 (each call sets
  *                                      its own VRAM cursor and writes
@@ -34,8 +39,8 @@
  * "Hello, world!" = 0,1,2,2,3,4,5,6,3,7,2,8,9.
  *
  * Build:
- *   ./plm80c smshello.plm 'org(0)' smsheader
- *   z80asm -o smshello.sms smshello.asm   (exactly 32768 bytes)
+ *   ./plm80c hello.plm 'org(0)' smsheader
+ *   z80asm -o hello.sms hello.asm   (exactly 32768 bytes)
  */
 SMSHELLO: DO;
 DECLARE I ADDRESS;
@@ -85,6 +90,13 @@ CALL VDPSETVRAMW(0);
 DO I = 0 TO 319;
   OUTPUT(190) = FONT(I);
 END;
+
+/* 3b. Clear the background BEFORE writing text: fill all 32x28
+   name-table entries with tile 5 (the all-zero space glyph) and
+   attribute 0.  Without this, the 1779 cells we never write hold
+   power-on VRAM garbage that typically reads as 0 = the 'H' glyph,
+   so the screen fills with H. */
+CALL VDPCLEARTILES(5, 0);
 
 /* 4. Tilemap: 13 tiles at row 0, columns 0-12, attribute 0. */
 J = 0;
