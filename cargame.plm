@@ -1,0 +1,377 @@
+/* CARGAME.PLM - Top-down road dodger for the SMS, in PL/M-80.
+ *
+ * D-pad Left/Right steers, Up/Down shifts speed (1-4). Dodge the red
+ * cars; each one you pass scores. Crash photoslides into the barrier:
+ * press Btn1 (TL) to restart. Btn1 also blips, Btn2 rattles the exhaust.
+ * Score (0-999) and speed sit on the grass at the top of the screen.
+ *
+ * Uses vdp.plm + pad.plm + psg.plm ($INCLUDE, column 1, before code).
+ * World model: the road scrolls (reg9) at SPEED, player sits at SPY=150,
+ * enemies fall at SPEED+1 (slower traffic you are overtaking). Player and
+ * each enemy are 2 stacked 8x8 sprites (8 SAT entries, terminator fixed
+ * at index 8). Cars are 1 bitplane: player plane0 (white), enemy plane1.
+ *
+ * VRAM map: bg patterns $0000 = 5 road tiles + 10 digit tiles (1bpp,
+ * digits drawn with HI=8 so they use the white sprite-palette entry);
+ * sprite patterns $2000 = player top/bottom, enemy top/bottom.
+ * Tilemap $3800: grass cols 0-9/22-31, road 10-21 with edges, dashes on
+ * odd rows at col 15. SAT $3F00, Y-terminator $D0 at index 8.
+ *
+ * Build:
+ *   ./plm80c cargame.plm 'org(0)' smsheader
+ *   z80asm -o cargame.sms cargame.asm   (exactly 32768 bytes)
+ */
+CARGAME: DO;
+DECLARE I ADDRESS;
+DECLARE DLY ADDRESS;
+DECLARE A ADDRESS;
+DECLARE R BYTE;
+DECLARE C BYTE;
+DECLARE T BYTE;
+DECLARE DX BYTE;
+DECLARE DY BYTE;
+DECLARE SCY BYTE;
+DECLARE SPX BYTE;
+DECLARE SPY BYTE;
+DECLARE TY BYTE;
+DECLARE SPEED BYTE;
+DECLARE LSPEED BYTE;
+DECLARE LO BYTE;
+DECLARE HI BYTE;
+DECLARE F BYTE;
+DECLARE H BYTE;
+DECLARE ENST BYTE;
+DECLARE TE BYTE;
+DECLARE HU BYTE;
+DECLARE LI BYTE;
+DECLARE K ADDRESS;
+DECLARE DXC BYTE;
+DECLARE DYC BYTE;
+DECLARE NSPR BYTE;
+DECLARE STATE BYTE;
+DECLARE VS BYTE;
+
+/* Enemy lanes: road interior cols 11-20 as sprite X pixels. */
+DECLARE ELANE(10) BYTE INITIAL (88, 96, 104, 112, 120, 128, 136, 144,
+152, 160);
+DECLARE EX(3) BYTE;
+DECLARE EY(3) BYTE;
+
+/* Engine note dividers per speed 1-4 (N = 300, 220, 160, 120). */
+DECLARE ENGDIV(8) BYTE INITIAL (12, 18, 12, 13, 0, 10, 8, 7);
+
+/* 5 road tiles x 32 bytes at $0000: grass, road, left edge, right edge,
+   centre dash. Two bitplanes: pixel = plane1:plane0, palette
+   0 green, 1 grey, 2 white, 3 red. Rows are (p0, p1, 0, 0). */
+DECLARE ROADPAT(160) BYTE INITIAL (
+0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+255,0,0,0, 255,0,0,0, 255,0,0,0, 255,0,0,0,
+255,0,0,0, 255,0,0,0, 255,0,0,0, 255,0,0,0,
+255,192,0,0, 255,192,0,0, 255,192,0,0, 255,192,0,0,
+255,192,0,0, 255,192,0,0, 255,192,0,0, 255,192,0,0,
+255,3,0,0, 255,3,0,0, 255,3,0,0, 255,3,0,0,
+255,3,0,0, 255,3,0,0, 255,3,0,0, 255,3,0,0,
+231,24,0,0, 231,24,0,0, 231,24,0,0, 231,24,0,0,
+231,24,0,0, 231,24,0,0, 231,24,0,0, 231,24,0,0);
+
+/* Digits 0-9 as 8x8 1bpp tiles (pattern index 5-14), rows (v, 0, 0, 0). */
+DECLARE DIGPAT(320) BYTE INITIAL (
+60,0,0,0, 102,0,0,0, 110,0,0,0, 118,0,0,0,
+102,0,0,0, 102,0,0,0, 60,0,0,0, 0,0,0,0,
+24,0,0,0, 24,0,0,0, 56,0,0,0, 24,0,0,0,
+24,0,0,0, 24,0,0,0, 60,0,0,0, 0,0,0,0,
+60,0,0,0, 102,0,0,0, 6,0,0,0, 12,0,0,0,
+48,0,0,0, 96,0,0,0, 126,0,0,0, 0,0,0,0,
+60,0,0,0, 102,0,0,0, 6,0,0,0, 28,0,0,0,
+6,0,0,0, 102,0,0,0, 60,0,0,0, 0,0,0,0,
+12,0,0,0, 28,0,0,0, 60,0,0,0, 108,0,0,0,
+126,0,0,0, 12,0,0,0, 12,0,0,0, 0,0,0,0,
+126,0,0,0, 96,0,0,0, 124,0,0,0, 6,0,0,0,
+6,0,0,0, 102,0,0,0, 60,0,0,0, 0,0,0,0,
+28,0,0,0, 48,0,0,0, 96,0,0,0, 124,0,0,0,
+102,0,0,0, 102,0,0,0, 60,0,0,0, 0,0,0,0,
+126,0,0,0, 102,0,0,0, 12,0,0,0, 24,0,0,0,
+24,0,0,0, 24,0,0,0, 24,0,0,0, 0,0,0,0,
+60,0,0,0, 102,0,0,0, 102,0,0,0, 60,0,0,0,
+102,0,0,0, 102,0,0,0, 60,0,0,0, 0,0,0,0,
+60,0,0,0, 102,0,0,0, 102,0,0,0, 62,0,0,0,
+6,0,0,0, 12,0,0,0, 56,0,0,0, 0,0,0,0);
+
+/* Sprite cars at $2000, rows (a, b, 0, 0): player top, player bottom,
+   enemy top, enemy bottom. Player uses plane0, enemy plane1. */
+DECLARE CARPAT(128) BYTE INITIAL (
+60,0,0,0, 126,0,0,0, 255,0,0,0, 255,0,0,0,
+195,0,0,0, 195,0,0,0, 255,0,0,0, 126,0,0,0,
+126,0,0,0, 255,0,0,0, 195,0,0,0, 195,0,0,0,
+255,0,0,0, 255,0,0,0, 126,0,0,0, 60,0,0,0,
+0,60,0,0, 0,126,0,0, 0,255,0,0, 0,255,0,0,
+0,195,0,0, 0,195,0,0, 0,255,0,0, 0,126,0,0,
+0,126,0,0, 0,255,0,0, 0,195,0,0, 0,195,0,0,
+0,255,0,0, 0,255,0,0, 0,126,0,0, 0,60,0,0);
+
+/* Background palette 0-15, sprite palette 16-31. */
+DECLARE BGPAL(16) BYTE INITIAL (12, 21, 63, 3, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0);
+DECLARE SPPAL(16) BYTE INITIAL (0, 63, 3, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0);
+
+$INCLUDE ('vdp.plm')
+$INCLUDE ('pad.plm')
+$INCLUDE ('psg.plm')
+
+/* Crash: noise burst, red border, hand control to game-over state. */
+CRASH: PROCEDURE;
+CALL PSGSILENCE;
+CALL PSGNOISE(4);
+CALL PSGSETVOL(3, 0);
+DO DLY = 0 TO 9000;
+END;
+CALL PSGMUTE(3);
+CALL VDPSETBORDER(2);
+STATE = 1;
+END CRASH;
+
+/* Reset positions, score, speed after game over. */
+RESETGAME: PROCEDURE;
+H = 0;
+TE = 0;
+HU = 0;
+F = 0;
+SPEED = 1;
+LSPEED = 0;
+SPX = 124;
+LI = 7;
+K = 0;
+DO WHILE K <> 3;
+EX(K) = ELANE(LI);
+LI = LI + 3;
+IF LI >= 10 THEN LI = LI - 10;
+IF K = 0 THEN EY(K) = 24;
+ELSE IF K = 1 THEN EY(K) = 80;
+ELSE EY(K) = 136;
+K = K + 1;
+END;
+CALL VDPSETBORDER(0);
+STATE = 0;
+END RESETGAME;
+
+/* --- init (display off until the end) --- */
+CALL VDPINIT;
+CALL VDPHIDELEFT;
+CALL PSGSILENCE;
+CALL PSGSETVOL(2, 13);
+
+/* Palettes. */
+CALL VDPSETCRAMW(0);
+DO I = 0 TO 15;
+OUTPUT(190) = BGPAL(I);
+END;
+CALL VDPSETCRAMW(16);
+DO I = 0 TO 15;
+OUTPUT(190) = SPPAL(I);
+END;
+
+/* Patterns: road + digits at $0000, cars at $2000. */
+CALL VDPSETVRAMW(0);
+DO I = 0 TO 159;
+OUTPUT(190) = ROADPAT(I);
+END;
+DO I = 0 TO 319;
+OUTPUT(190) = DIGPAT(I);
+END;
+CALL VDPSETVRAMW(8192);
+DO I = 0 TO 127;
+OUTPUT(190) = CARPAT(I);
+END;
+
+/* Tilemap: grass, road cols 10-21, dashes on odd rows at col 15. */
+A = 14336;
+R = 0;
+DO WHILE R <> 28;
+CALL VDPSETVRAMW(A);
+C = 0;
+DO WHILE C <> 32;
+IF C = 10 THEN T = 2;
+ELSE IF C = 21 THEN T = 3;
+ELSE IF C = 15 THEN DO;
+IF (R AND 1) <> 0 THEN T = 4;
+ELSE T = 1;
+END;
+ELSE IF C < 10 THEN T = 0;
+ELSE IF C > 21 THEN T = 0;
+ELSE T = 1;
+OUTPUT(190) = T;
+OUTPUT(190) = 0;
+C = C + 1;
+END;
+A = A + 64;
+R = R + 1;
+END;
+
+CALL VDPHIDESPRITES;
+/* Permanent Y-terminator at sprite index 8 (we use 0-7). */
+CALL VDPSETVRAMW(16136);
+OUTPUT(190) = 208;
+CALL VDPSETSCROLLX(0);
+CALL VDPDISPLAYON;
+
+STATE = 0;
+H = 0;
+TE = 0;
+HU = 0;
+F = 0;
+SPEED = 1;
+LSPEED = 0;
+SPX = 124;
+SPY = 150;
+SCY = 0;
+LI = 7;
+PADCUR1 = 0;
+PADPREV1 = 0;
+PADJUST1 = 0;
+K = 0;
+DO WHILE K <> 3;
+IF K = 0 THEN EX(K) = ELANE(1);
+ELSE IF K = 1 THEN EX(K) = ELANE(4);
+ELSE EX(K) = ELANE(7);
+IF K = 0 THEN EY(K) = 24;
+ELSE IF K = 1 THEN EY(K) = 80;
+ELSE EY(K) = 136;
+K = K + 1;
+END;
+
+/* --- main loop --- */
+DO WHILE 1;
+CALL PADPOLL1;
+
+IF STATE = 0 THEN DO;
+/* Steering: double DIRX step of -1/0/+1, clamp to road. */
+DX = PADDIRX(PADCUR1);
+SPX = SPX + DX;
+SPX = SPX + DX;
+IF SPX < 84 THEN SPX = 84;
+IF SPX > 164 THEN SPX = 164;
+
+/* Speed on edges, 1-4. */
+IF (PADJUST1 AND PADUP) <> 0 THEN DO;
+IF SPEED < 4 THEN SPEED = SPEED + 1;
+END;
+IF (PADJUST1 AND PADDOWN) <> 0 THEN DO;
+IF SPEED > 1 THEN SPEED = SPEED - 1;
+END;
+
+/* Engine note follows speed. */
+IF SPEED <> LSPEED THEN DO;
+LSPEED = SPEED;
+K = SPEED + SPEED;
+K = K - 2;
+LO = ENGDIV(K);
+K = K + 1;
+HI = ENGDIV(K);
+CALL PSGTONE(2, LO, HI);
+END;
+
+/* Score ticks with distance, BCD digits, cap 999. */
+F = F + 1;
+IF F = 30 THEN DO;
+F = 0;
+HU = HU + SPEED;
+DO WHILE HU >= 10;
+HU = HU - 10;
+TE = TE + 1;
+END;
+DO WHILE TE >= 10;
+TE = TE - 10;
+H = H + 1;
+END;
+IF H > 9 THEN DO;
+H = 9;
+TE = 9;
+HU = 9;
+END;
+END;
+
+/* Horn / exhaust on button edges. */
+IF (PADJUST1 AND PADBTN1) <> 0 THEN DO;
+CALL PSGNOTE(0, 4);
+CALL PSGSETVOL(0, 2);
+DO DLY = 0 TO 1500;
+END;
+CALL PSGMUTE(0);
+END;
+IF (PADJUST1 AND PADBTN2) <> 0 THEN DO;
+CALL PSGNOISE(5);
+CALL PSGSETVOL(3, 4);
+DO DLY = 0 TO 1500;
+END;
+CALL PSGMUTE(3);
+END;
+
+/* Enemies fall at SPEED + 1; respawn at the top in a new lane. */
+K = 0;
+DO WHILE K <> 3;
+EY(K) = EY(K) + SPEED;
+EY(K) = EY(K) + 1;
+IF EY(K) > 176 THEN DO;
+EY(K) = 24;
+LI = LI + 1;
+IF LI = 10 THEN LI = 0;
+EX(K) = ELANE(LI);
+END;
+K = K + 1;
+END;
+
+/* Collision: |dx| < 8 and |dy| < 16 means a crash. */
+K = 0;
+DO WHILE K <> 3;
+IF SPX >= EX(K) THEN DXC = SPX - EX(K);
+ELSE DXC = EX(K) - SPX;
+IF SPY >= EY(K) THEN DYC = SPY - EY(K);
+ELSE DYC = EY(K) - SPY;
+IF DXC < 8 THEN IF DYC < 16 THEN DO;
+CALL CRASH;
+/* Break out: the increment below must land on 3 to exit the loop.
+   (K = 3 here would become 4 and loop forever on out-of-bounds
+   EX/EY indices -- that was the collision freeze.) */
+K = 2;
+END;
+K = K + 1;
+END;
+
+/* World scroll, wrap at the 224-line tilemap edge. */
+SCY = SCY + SPEED;
+IF SCY >= 224 THEN SCY = SCY - 224;
+END;
+ELSE DO;
+/* Game over: Btn1 restarts. */
+IF (PADJUST1 AND PADBTN1) <> 0 THEN DO;
+CALL RESETGAME;
+END;
+END;
+
+CALL VDPWAITBLANK;
+CALL VDPSETSCROLLY(SCY);
+/* Player (sat 0-1) and enemies (sat 2-7). */
+Ty = SPY + 8;
+CALL VDPSETSPRITE(0, SPX, SPY, 0);
+CALL VDPSETSPRITE(1, SPX, Ty, 1);
+NSPR = 2;
+K = 0;
+DO WHILE K <> 3;
+Ty = EY(K) + 8;
+CALL VDPSETSPRITE(NSPR, EX(K), EY(K), 2);
+NSPR = NSPR + 1;
+CALL VDPSETSPRITE(NSPR, EX(K), Ty, 3);
+NSPR = NSPR + 1;
+K = K + 1;
+END;
+/* Score + speed readout on the grass (sprite palette white). */
+CALL VDPWRITETILE(13, 0, 5 + H, 8);
+CALL VDPWRITETILE(14, 0, 5 + TE, 8);
+CALL VDPWRITETILE(15, 0, 5 + HU, 8);
+CALL VDPWRITETILE(20, 0, 5 + SPEED, 8);
+VS = VDPGETSTATUS;
+END;
+
+END;
