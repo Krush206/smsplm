@@ -1,0 +1,271 @@
+/* VDP.PLM - TMS9918-derived Sega VDP library for PL/M-80 (SMS, Mode 4).
+ *
+ * Include from the main module, inside its DO block before any statements:
+ * $INCLUDE ('vdp.plm')
+ * ($ must be in column 1. All names are VDP-prefixed to avoid clashes.)
+ *
+ * Hardware refs: smspower.org Development/ControlPort, VDPRegisters,
+ * Tilemap, Sprites, Palette. Ports: data 190 ($BE), control 191 ($BF),
+ * V-counter 126 ($7E), H-counter 127 ($7F, shared with PSG on write).
+ *
+ * Control sequences (low byte first, high byte second):
+ *   register write: OUT $BF = value, OUT $BF = 128 + reg (0-10)
+ *   VRAM write:     OUT $BF = LOW(addr), OUT $BF = (HIGH(addr) AND 63) + 64
+ *   VRAM read:      OUT $BF = LOW(addr), OUT $BF = HIGH(addr) AND 63
+ *   CRAM write:     OUT $BF = index (0-31), OUT $BF = 192 ($C0)
+ * Status read (IN $BF, clears flags): bit7 VBlank, bit6 sprite overflow
+ * (>8 sprites on a line), bit5 sprite collision.
+ *
+ * Defaults loaded by VDPINIT (smslib REGISTER_*_DEFAULT, display OFF,
+ * frame interrupts ON): reg0=6, reg1=160, reg2=255 (tilemap $3800),
+ * reg3=255, reg4=7 (patterns $0000), reg5=255 (sprite table $3F00),
+ * reg6=255 (sprite patterns $2000), reg7=0, reg8=0, reg9=0, reg10=255.
+ * Tilemap $3800: 32x28 entries x2 bytes (tile idx bits0-8, $200 H-flip,
+ * $400 V-flip, $800 sprite palette, $1000 priority).
+ * Sprite table $3F00: 64 Y bytes, then X/pattern pairs at $3F80;
+ * Y value $D0 (208) terminates (192-line mode).
+ * Palette: 32 CRAM entries --BBGGRR, 0-15 background, 16-31 sprite.
+ *
+ * API:
+ *   CALL VDPINIT;                 init regs (display off) + mirrors
+ *   CALL VDPSETREG(reg, val);     raw register write
+ *   CALL VDPSETVRAMW(addr);       VRAM write cursor (ADDRESS 0-$3FFF)
+ *   CALL VDPSETVRAMR(addr);       VRAM read cursor (buffered, see docs)
+ *   CALL VDPSETCRAMW(idx);        CRAM write cursor (0-31)
+ *   CALL VDPDISPLAYON;            set reg1 bit6 (mirror kept)
+ *   CALL VDPDISPLAYOFF;           clear reg1 bit6
+ *   CALL VDPHIDELEFT;             set reg0 bit5 (hide left column)
+ *   CALL VDPSHOWLEFT;             clear reg0 bit5
+ *   CALL VDPSETSCROLLX(v);        reg8
+ *   CALL VDPSETSCROLLY(v);        reg9
+ *   CALL VDPSETBORDER(v);         reg7, low 4 bits (sprite palette idx)
+ *   CALL VDPSETLINECT(v);         reg10
+ *   CALL VDPWAITBLANK;            poll $BF until bit7 set
+ *   s = VDPGETSTATUS;             status byte (BYTE fn, clears flags)
+ *   v = VDPGETVLINE;              V-counter row being drawn
+ *   h = VDPGETHLINE;              H-counter
+ *   CALL VDPFILL(val, count);     OUTPUT val x count to data port
+ *   CALL VDPWRITETILE(c, r, lo, hi); 2 bytes at tilemap (c,r)
+ *   CALL VDPCLEARTILES(lo, hi);   fill 32x28 tilemap with entry (lo,hi)
+ *   CALL VDPHIDESPRITES;          Y terminator at $3F00 (empty table)
+ *   CALL VDPSETSPRITE(n, x, y, pat); sprite n (0-63), raw SAT values
+ */
+DECLARE VDPPORTDATA LITERALLY '190';
+DECLARE VDPPORTCTRL LITERALLY '191';
+DECLARE VDPVCOUNTPORT LITERALLY '126';
+DECLARE VDPHCOUNTPORT LITERALLY '127';
+
+/* Register value mirrors for read-modify-write toggles. */
+DECLARE VDPREG0 BYTE;
+DECLARE VDPREG1 BYTE;
+
+/* Raw register write: value, then 128 + reg. */
+VDPSETREG: PROCEDURE (REG, VAL);
+DECLARE REG BYTE;
+DECLARE VAL BYTE;
+OUTPUT(VDPPORTCTRL) = VAL;
+OUTPUT(VDPPORTCTRL) = 128 + REG;
+END VDPSETREG;
+
+/* Init all registers to smslib defaults, display OFF. */
+VDPINIT: PROCEDURE;
+VDPREG0 = 6;
+VDPREG1 = 160;
+CALL VDPSETREG(0, 6);
+CALL VDPSETREG(1, 160);
+CALL VDPSETREG(2, 255);
+CALL VDPSETREG(3, 255);
+CALL VDPSETREG(4, 7);
+CALL VDPSETREG(5, 255);
+CALL VDPSETREG(6, 255);
+CALL VDPSETREG(7, 0);
+CALL VDPSETREG(8, 0);
+CALL VDPSETREG(9, 0);
+CALL VDPSETREG(10, 255);
+END VDPINIT;
+
+/* VRAM write cursor for a 14-bit address. */
+VDPSETVRAMW: PROCEDURE (ADDR);
+DECLARE ADDR ADDRESS;
+DECLARE HI BYTE;
+OUTPUT(VDPPORTCTRL) = LOW(ADDR);
+HI = (HIGH(ADDR) AND 63) + 64;
+OUTPUT(VDPPORTCTRL) = HI;
+END VDPSETVRAMW;
+
+/* VRAM read cursor (first data-port read returns the buffered byte). */
+VDPSETVRAMR: PROCEDURE (ADDR);
+DECLARE ADDR ADDRESS;
+DECLARE HI BYTE;
+OUTPUT(VDPPORTCTRL) = LOW(ADDR);
+HI = HIGH(ADDR) AND 63;
+OUTPUT(VDPPORTCTRL) = HI;
+END VDPSETVRAMR;
+
+/* CRAM (palette) write cursor, index 0-31. */
+VDPSETCRAMW: PROCEDURE (IDX);
+DECLARE IDX BYTE;
+OUTPUT(VDPPORTCTRL) = IDX;
+OUTPUT(VDPPORTCTRL) = 192;
+END VDPSETCRAMW;
+
+/* Display on/off via reg1 mirror bit 6 (64). */
+VDPDISPLAYON: PROCEDURE;
+VDPREG1 = VDPREG1 OR 64;
+CALL VDPSETREG(1, VDPREG1);
+END VDPDISPLAYON;
+
+VDPDISPLAYOFF: PROCEDURE;
+VDPREG1 = VDPREG1 AND 191;
+CALL VDPSETREG(1, VDPREG1);
+END VDPDISPLAYOFF;
+
+/* Left-column hide via reg0 mirror bit 5 (32). */
+VDPHIDELEFT: PROCEDURE;
+VDPREG0 = VDPREG0 OR 32;
+CALL VDPSETREG(0, VDPREG0);
+END VDPHIDELEFT;
+
+VDPSHOWLEFT: PROCEDURE;
+VDPREG0 = VDPREG0 AND 223;
+CALL VDPSETREG(0, VDPREG0);
+END VDPSHOWLEFT;
+
+/* Scroll, border (low 4 bits), line counter. */
+VDPSETSCROLLX: PROCEDURE (VAL);
+DECLARE VAL BYTE;
+OUTPUT(VDPPORTCTRL) = VAL;
+OUTPUT(VDPPORTCTRL) = 136;
+END VDPSETSCROLLX;
+
+VDPSETSCROLLY: PROCEDURE (VAL);
+DECLARE VAL BYTE;
+OUTPUT(VDPPORTCTRL) = VAL;
+OUTPUT(VDPPORTCTRL) = 137;
+END VDPSETSCROLLY;
+
+VDPSETBORDER: PROCEDURE (VAL);
+DECLARE VAL BYTE;
+DECLARE V BYTE;
+V = VAL AND 15;
+OUTPUT(VDPPORTCTRL) = V;
+OUTPUT(VDPPORTCTRL) = 135;
+END VDPSETBORDER;
+
+VDPSETLINECT: PROCEDURE (VAL);
+DECLARE VAL BYTE;
+OUTPUT(VDPPORTCTRL) = VAL;
+OUTPUT(VDPPORTCTRL) = 138;
+END VDPSETLINECT;
+
+/* Poll VDP status until the VBlank flag (bit 7) is set. */
+VDPWAITBLANK: PROCEDURE;
+DECLARE S BYTE;
+S = INPUT(VDPPORTCTRL);
+DO WHILE (S AND 128) = 0;
+S = INPUT(VDPPORTCTRL);
+END;
+END VDPWAITBLANK;
+
+/* Status byte (clears flags on read); V/H counter reads. */
+VDPGETSTATUS: PROCEDURE BYTE;
+DECLARE S BYTE;
+S = INPUT(VDPPORTCTRL);
+RETURN S;
+END VDPGETSTATUS;
+
+VDPGETVLINE: PROCEDURE BYTE;
+DECLARE V BYTE;
+V = INPUT(VDPVCOUNTPORT);
+RETURN V;
+END VDPGETVLINE;
+
+VDPGETHLINE: PROCEDURE BYTE;
+DECLARE V BYTE;
+V = INPUT(VDPHCOUNTPORT);
+RETURN V;
+END VDPGETHLINE;
+
+/* Write VAL to the data port COUNT times (caller sets cursor first). */
+VDPFILL: PROCEDURE (VAL, COUNT);
+DECLARE VAL BYTE;
+DECLARE COUNT ADDRESS;
+DECLARE I ADDRESS;
+I = 0;
+DO WHILE I <> COUNT;
+OUTPUT(VDPPORTDATA) = VAL;
+I = I + 1;
+END;
+END VDPFILL;
+
+/* Write one 2-byte tilemap entry at column C (0-31), row R (0-27).
+   Address = $3800 + R * 64 + C * 2, done with adds only. */
+VDPWRITETILE: PROCEDURE (C, R, LO, HI);
+DECLARE C BYTE;
+DECLARE R BYTE;
+DECLARE LO BYTE;
+DECLARE HI BYTE;
+DECLARE A ADDRESS;
+DECLARE K BYTE;
+A = 14336;
+K = 0;
+DO WHILE K <> R;
+A = A + 64;
+K = K + 1;
+END;
+K = 0;
+DO WHILE K <> C;
+A = A + 2;
+K = K + 1;
+END;
+CALL VDPSETVRAMW(A);
+OUTPUT(VDPPORTDATA) = LO;
+OUTPUT(VDPPORTDATA) = HI;
+END VDPWRITETILE;
+
+/* Fill the whole 32x28 tilemap (1792 bytes) with entry (LO, HI). */
+VDPCLEARTILES: PROCEDURE (LO, HI);
+DECLARE LO BYTE;
+DECLARE HI BYTE;
+DECLARE I ADDRESS;
+CALL VDPSETVRAMW(14336);
+I = 0;
+DO WHILE I <> 1792;
+OUTPUT(VDPPORTDATA) = LO;
+OUTPUT(VDPPORTDATA) = HI;
+I = I + 2;
+END;
+END VDPCLEARTILES;
+
+/* Empty sprite table: Y terminator $D0 at $3F00. */
+VDPHIDESPRITES: PROCEDURE;
+CALL VDPSETVRAMW(16128);
+OUTPUT(VDPPORTDATA) = 208;
+END VDPHIDESPRITES;
+
+/* Sprite N (0-63): Y at $3F00 + N, X/pattern at $3F80 + N * 2. */
+VDPSETSPRITE: PROCEDURE (N, X, Y, PAT);
+DECLARE N BYTE;
+DECLARE X BYTE;
+DECLARE Y BYTE;
+DECLARE PAT BYTE;
+DECLARE A ADDRESS;
+DECLARE K BYTE;
+A = 16128;
+K = 0;
+DO WHILE K <> N;
+A = A + 1;
+K = K + 1;
+END;
+CALL VDPSETVRAMW(A);
+OUTPUT(VDPPORTDATA) = Y;
+A = 16256;
+K = 0;
+DO WHILE K <> N;
+A = A + 2;
+K = K + 1;
+END;
+CALL VDPSETVRAMW(A);
+OUTPUT(VDPPORTDATA) = X;
+OUTPUT(VDPPORTDATA) = PAT;
+END VDPSETSPRITE;
