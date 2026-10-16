@@ -1,0 +1,123 @@
+/* LIBDEMO.PLM - Demo for vdp.plm + pad.plm + psg.plm (SMS, PL/M-80).
+ *
+ * D-pad moves a sprite and scrolls the background, Btn1 (TL) plays a
+ * tone blip, Btn2 (TR) plays a noise burst. Uses only library calls plus
+ * small ROM data tables below.
+ *
+ * Build:
+ *   ./plm80c libdemo.plm 'org(0)' smsheader
+ *   z80asm -o libdemo.sms libdemo.asm   (exactly 32768 bytes)
+ */
+LIBDEMO: DO;
+DECLARE I ADDRESS;
+DECLARE DLY ADDRESS;
+DECLARE DX BYTE;
+DECLARE DY BYTE;
+DECLARE SCX BYTE;
+DECLARE SCY BYTE;
+DECLARE SPX BYTE;
+DECLARE SPY BYTE;
+DECLARE P2 BYTE;
+DECLARE VS BYTE;
+
+/* 2 background tiles x 32 bytes at VRAM $0000: blank + checkerboard. */
+DECLARE TILES(64) BYTE INITIAL (
+0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+170,0,0,0, 85,0,0,0, 170,0,0,0, 85,0,0,0,
+170,0,0,0, 85,0,0,0, 170,0,0,0, 85,0,0,0);
+
+/* 1 sprite tile (diamond) at VRAM $2000. */
+DECLARE SPRTILE(32) BYTE INITIAL (
+16,0,0,0, 56,0,0,0, 124,0,0,0, 254,0,0,0,
+124,0,0,0, 56,0,0,0, 16,0,0,0, 0,0,0,0);
+
+$INCLUDE ('vdp.plm')
+$INCLUDE ('pad.plm')
+$INCLUDE ('psg.plm')
+
+/* Short tone blip on channel 0 (E5), then mute. */
+BEEP: PROCEDURE;
+CALL PSGNOTE(0, 4);
+CALL PSGSETVOL(0, 2);
+DO DLY = 0 TO 3000;
+END;
+CALL PSGMUTE(0);
+END BEEP;
+
+/* Short white-noise burst on channel 3, then mute. */
+NOISEFX: PROCEDURE;
+CALL PSGNOISE(5);
+CALL PSGSETVOL(3, 2);
+DO DLY = 0 TO 3000;
+END;
+CALL PSGMUTE(3);
+END NOISEFX;
+
+/* --- init (display off until the end) --- */
+CALL VDPINIT;
+CALL VDPHIDELEFT;
+CALL PSGSILENCE;
+
+/* Background palette: black, white. */
+CALL VDPSETCRAMW(0);
+OUTPUT(190) = 0;
+OUTPUT(190) = 63;
+
+/* Sprite palette: transparent, white. */
+CALL VDPSETCRAMW(16);
+OUTPUT(190) = 0;
+OUTPUT(190) = 63;
+
+/* Patterns: 2 bg tiles at $0000, 1 sprite tile at $2000. */
+CALL VDPSETVRAMW(0);
+DO I = 0 TO 63;
+OUTPUT(190) = TILES(I);
+END;
+CALL VDPSETVRAMW(8192);
+DO I = 0 TO 31;
+OUTPUT(190) = SPRTILE(I);
+END;
+
+/* Tilemap: fill with tile 1, blank a patch in the corner. */
+CALL VDPCLEARTILES(1, 0);
+CALL VDPWRITETILE(2, 2, 0, 0);
+CALL VDPWRITETILE(3, 2, 0, 0);
+CALL VDPWRITETILE(2, 3, 0, 0);
+CALL VDPWRITETILE(3, 3, 0, 0);
+
+CALL VDPHIDESPRITES;
+CALL VDPDISPLAYON;
+
+PADCUR1 = 0;
+PADPREV1 = 0;
+PADJUST1 = 0;
+SPX = 120;
+SPY = 90;
+SCX = 0;
+SCY = 0;
+
+/* --- main loop --- */
+DO WHILE 1;
+CALL PADPOLL1;
+DX = PADDIRX(PADCUR1);
+DY = PADDIRY(PADCUR1);
+SPX = SPX + DX;
+SPY = SPY + DY;
+SCX = SCX + DX;
+SCY = SCY + DY;
+P2 = PADREAD2;
+IF (PADJUST1 AND PADBTN1) <> 0 THEN DO;
+CALL BEEP;
+END;
+IF (PADJUST1 AND PADBTN2) <> 0 THEN DO;
+CALL NOISEFX;
+END;
+CALL VDPWAITBLANK;
+CALL VDPSETSCROLLX(SCX);
+CALL VDPSETSCROLLY(SCY);
+CALL VDPSETSPRITE(0, SPX, SPY, 0);
+VS = VDPGETSTATUS;
+END;
+
+END;
