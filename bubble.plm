@@ -1,0 +1,180 @@
+/* BUBBLE.PLM - Moving-sprite demo for the Sega Master System, in PL/M-80.
+ *
+ * Adapts lajohnston/smslib example 05-movingSprites (main.asm + bubble.asm,
+ * WLA-DX) with each smslib call replaced by the equivalent raw port writes.
+ * VDP command/control = 191 ($BF), data = 190 ($BE), joypad port 1 = 220
+ * ($DC), VDP status = 191 ($BF, read).
+ *
+ *   smslib init                     -> CPU starts at 0, stack at DFF0H (the
+ *                                      smsheader build puts data/stack in RAM)
+ *   vdpSettings.init                -> register block below (display OFF)
+ *   palette.setIndex(0)+writeRgb     -> CRAM index 0 = black (0)
+ *   palette.setIndex(16)+writeBytes -> CRAM index 16, 6 sprite colors
+ *   patterns.setIndex(256)+write    -> VRAM write at $2000, 192 pattern bytes
+ *   bubble.init                     -> XPOS=100, YPOS=80, XVEC=YVEC=0
+ *   vdpSettings batch               -> reg 0 = 38 (06H default + 20H hide
+ *                                      left column), reg 1 = 224 (0E0H,
+ *                                      display on) at the end
+ *   bubble.updateInput              -> INPUT(220), invert, loadDirX/Y x2
+ *                                      (LEFT bit 4, RIGHT bit 8, UP bit 1,
+ *                                      DOWN bit 2; vector -2/0/+2, stored as
+ *                                      BYTE 254/0/2 so BYTE add wraps)
+ *   bubble.updateMovement           -> XPOS=XPOS+XVEC, YPOS=YPOS+YVEC
+ *   sprites.reset+addGroup+copyToVram -> direct VRAM writes each frame:
+ *                                      Y table at $3F00 (4 Y + D0H
+ *                                      terminator), X/pattern at $3F80.
+ *                                      (No RAM mirror buffer; all 4 sprites
+ *                                      are assumed on-screen, as in the
+ *                                      original when the bubble is visible.)
+ *   interrupts.waitForVBlank        -> poll $BF until bit 7 set
+ *
+ * Bubble struct (xPos, yPos, xVec, yVec) becomes 4 BYTE globals; the
+ * 4-sprite group (pattern,relX,relY) = (1,0,0),(2,8,0),(3,0,8),(4,8,8)
+ * is emitted as inline OUTPUTs (see main loop).
+ *
+ * Palette (6) and patterns (192 = 6 x 32) are the binary assets from
+ * examples/assets/bubble/{palette,patterns}.bin, --bbggrr / SMS 4-bit tiles.
+ *
+ * Build:
+ *   ./plm80c bubble.plm 'org(0)' smsheader
+ *   z80asm -o bubble.sms bubble.asm   (exactly 32768 bytes)
+ */
+BUBBLE: DO;
+DECLARE I ADDRESS;
+DECLARE PAD BYTE;
+DECLARE STATUS BYTE;
+DECLARE XPOS BYTE;
+DECLARE YPOS BYTE;
+DECLARE XVEC BYTE;
+DECLARE YVEC BYTE;
+DECLARE TX BYTE;
+DECLARE TY BYTE;
+
+/* Sprite palette: CRAM indices 16-21 (from palette.bin). */
+DECLARE BUBPAL(6) BYTE INITIAL (0, 17, 34, 54, 50, 63);
+
+/* Sprite patterns: 6 tiles x 32 bytes for VRAM $2000 (from patterns.bin). */
+DECLARE BUBPAT(192) BYTE INITIAL (
+0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+8,7,0,0, 3,27,4,0, 15,47,16,0, 31,95,32,0,
+191,127,0,0, 63,191,64,0, 127,255,0,0, 127,255,0,0,
+16,224,0,0, 192,216,32,0, 240,244,8,0, 248,154,100,0,
+253,238,16,0, 252,245,10,0, 254,247,8,0, 254,255,0,0,
+127,255,0,0, 127,255,0,0, 63,191,64,0, 191,127,0,0,
+31,95,32,0, 15,47,16,0, 3,27,4,0, 8,7,0,0,
+254,255,0,0, 254,255,0,0, 252,253,2,0, 253,254,0,0,
+248,250,4,0, 240,244,8,0, 192,216,32,0, 16,224,0,0,
+66,60,0,0, 189,126,0,0, 126,247,8,0, 126,251,4,0,
+126,255,0,0, 126,255,0,0, 189,126,0,0, 66,60,0,0);
+
+/* 1. VDP registers: OUT value, then OUT 80H+reg (smslib setRegister).
+   Display starts OFF (reg 1 = A0H); enabled at the end. */
+OUTPUT(191) = 6;   OUTPUT(191) = 128;   /* reg 0: mode control 1 */
+OUTPUT(191) = 160; OUTPUT(191) = 129;   /* reg 1: mode control 2, display off */
+OUTPUT(191) = 255; OUTPUT(191) = 130;   /* reg 2: tilemap base $3800 */
+OUTPUT(191) = 255; OUTPUT(191) = 131;   /* reg 3: palette base */
+OUTPUT(191) = 7;   OUTPUT(191) = 132;   /* reg 4: pattern base $0000 */
+OUTPUT(191) = 255; OUTPUT(191) = 133;   /* reg 5: sprite table base $3F00 */
+OUTPUT(191) = 255; OUTPUT(191) = 134;   /* reg 6: sprite patterns base */
+OUTPUT(191) = 0;   OUTPUT(191) = 135;   /* reg 7: backdrop color 0 */
+OUTPUT(191) = 0;   OUTPUT(191) = 136;   /* reg 8: scroll X */
+OUTPUT(191) = 0;   OUTPUT(191) = 137;   /* reg 9: scroll Y */
+OUTPUT(191) = 255; OUTPUT(191) = 138;   /* reg 10: line counter */
+
+/* 2. Background palette index 0 = black (palette.setIndex 0 + writeRgb 0,0,0). */
+OUTPUT(191) = 0;
+OUTPUT(191) = 192;
+OUTPUT(190) = 0;
+
+/* 3. Sprite palette: CRAM write at index 16 (OUT 16, OUT C0H), 6 colors. */
+OUTPUT(191) = 16;
+OUTPUT(191) = 192;
+DO I = 0 TO 5;
+  OUTPUT(190) = BUBPAL(I);
+END;
+
+/* 4. Sprite patterns: VRAM write at $2000 (index 256; OUT 0, OUT 60H). */
+OUTPUT(191) = 0;
+OUTPUT(191) = 96;
+DO I = 0 TO 191;
+  OUTPUT(190) = BUBPAT(I);
+END;
+
+/* 5. bubble.init: default position and stopped vector. */
+XPOS = 100;
+YPOS = 80;
+XVEC = 0;
+YVEC = 0;
+
+/* 6. sprites.init: cap empty sprite table with Y terminator D0H (208). */
+OUTPUT(191) = 0;
+OUTPUT(191) = 127;
+OUTPUT(190) = 208;
+
+/* 7. vdpSettings batch: hideLeftColumn (reg0=06H+20H=26H=38),
+   enableDisplay (reg1=A0H+40H=E0H=224). */
+OUTPUT(191) = 38;
+OUTPUT(191) = 128;
+OUTPUT(191) = 224;
+OUTPUT(191) = 129;
+
+/* 8. mainLoop: read pad, move bubble, wait VBlank, draw 4 sprites. */
+DO WHILE 1;
+  /* bubble.updateInput: input.readPort1 (IN $DC, invert so 1=pressed). */
+  PAD = INPUT(220);
+  PAD = 255 - PAD;
+
+  /* input.loadDirX 'a',2: LEFT(bit2,mask4)=-2, RIGHT(bit3,mask8)=+2. */
+  IF (PAD AND 4) <> 0 THEN DO;
+    XVEC = 254; /* -2 */
+  END;
+  ELSE DO;
+    IF (PAD AND 8) <> 0 THEN XVEC = 2;
+    ELSE XVEC = 0;
+  END;
+
+  /* input.loadDirY 'a',2: UP(bit0,mask1)=-2, DOWN(bit1,mask2)=+2. */
+  IF (PAD AND 1) <> 0 THEN DO;
+    YVEC = 254; /* -2 */
+  END;
+  ELSE DO;
+    IF (PAD AND 2) <> 0 THEN YVEC = 2;
+    ELSE YVEC = 0;
+  END;
+
+  /* bubble.updateMovement: 8-bit wrap-around add. */
+  XPOS = XPOS + XVEC;
+  YPOS = YPOS + YVEC;
+
+  /* interrupts.waitForVBlank: poll VDP status bit 7. */
+  STATUS = INPUT(191);
+  DO WHILE (STATUS AND 128) = 0;
+    STATUS = INPUT(191);
+  END;
+
+  /* sprites.reset + bubble.updateSprite + copyToVram, fused:
+     Y table at $3F00 (OUT 0, OUT 7FH), then X/pattern at $3F80
+     (OUT 80H, OUT 7FH). Group offsets (0,0),(8,0),(0,8),(8,8). */
+  TX = XPOS + 8;
+  TY = YPOS + 8;
+  OUTPUT(191) = 0;
+  OUTPUT(191) = 127;
+  OUTPUT(190) = YPOS;
+  OUTPUT(190) = YPOS;
+  OUTPUT(190) = TY;
+  OUTPUT(190) = TY;
+  OUTPUT(190) = 208;
+  OUTPUT(191) = 128;
+  OUTPUT(191) = 127;
+  OUTPUT(190) = XPOS;
+  OUTPUT(190) = 1;
+  OUTPUT(190) = TX;
+  OUTPUT(190) = 2;
+  OUTPUT(190) = XPOS;
+  OUTPUT(190) = 3;
+  OUTPUT(190) = TX;
+  OUTPUT(190) = 4;
+END;
+
+END;
