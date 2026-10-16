@@ -1,0 +1,107 @@
+/* PAD.PLM - SMS controller (joypad) library for PL/M-80.
+ *
+ * Include from the main module, inside its DO block before any statements:
+ * $INCLUDE ('pad.plm')
+ * ($ must be in column 1. All names are PAD-prefixed to avoid clashes.)
+ *
+ * Hardware ref: smspower.org Development/PeripheralPorts. Ports are
+ * active-low (0 = pressed), so every read is inverted to 1 = pressed.
+ *   $DC (220): bit0 P1 Up, bit1 Down, bit2 Left, bit3 Right,
+ *              bit4 P1 Btn1 (TL), bit5 P1 Btn2 (TR),
+ *              bit6 P2 Up, bit7 P2 Down.
+ *   $DD (221): bit0 P2 Left, bit1 P2 Right, bit2 P2 Btn1 (TL),
+ *              bit3 P2 Btn2 (TR), bit4 Reset (*), bits 6-7 TH pins.
+ * (*) Reset returns 1 where the hardware is absent (e.g. SMS2).
+ * The Pause button is NOT a port bit; it raises a CPU NMI instead.
+ *
+ * State kept for port 1: PADCUR1 (this frame), PADPREV1 (last frame),
+ * PADJUST1 (bits pressed this frame but not last, i.e. edge detect).
+ * Refresh with CALL PADPOLL1 once per frame, then read the globals.
+ *
+ * API:
+ *   p = PADREAD1;            P1 byte + P2 Up/Down, 1 = pressed (BYTE fn)
+ *   p = PADREAD2;            P2 Left/Right/Btns (+Reset/TH raw), inverted
+ *   d = PADDIRX(p);          -1/0/+1 as 255/0/1, Left priority (BYTE fn)
+ *   d = PADDIRY(p);          -1/0/+1 as 255/0/1, Up priority (BYTE fn)
+ *   CALL PADPOLL1;           PREV=CUR; CUR=read1; JUST=edge bits
+ *   (then test e.g. IF (PADJUST1 AND PADBTN1) <> 0 THEN ...)
+ */
+DECLARE PADPORT1 LITERALLY '220';
+DECLARE PADPORT2 LITERALLY '221';
+
+/* Button masks for the inverted (1 = pressed) port-1 byte. */
+DECLARE PADUP LITERALLY '1';
+DECLARE PADDOWN LITERALLY '2';
+DECLARE PADLEFT LITERALLY '4';
+DECLARE PADRIGHT LITERALLY '8';
+DECLARE PADBTN1 LITERALLY '16';
+DECLARE PADBTN2 LITERALLY '32';
+
+/* Mask table for the edge-detect loop. */
+DECLARE PADMSKS(6) BYTE INITIAL (1, 2, 4, 8, 16, 32);
+
+/* Port-1 poll state. */
+DECLARE PADCUR1 BYTE;
+DECLARE PADPREV1 BYTE;
+DECLARE PADJUST1 BYTE;
+
+/* Inverted port reads: 1 = pressed. */
+PADREAD1: PROCEDURE BYTE;
+DECLARE P BYTE;
+P = INPUT(PADPORT1);
+P = 255 - P;
+RETURN P;
+END PADREAD1;
+
+PADREAD2: PROCEDURE BYTE;
+DECLARE P BYTE;
+P = INPUT(PADPORT2);
+P = 255 - P;
+RETURN P;
+END PADREAD2;
+
+/* X direction from an inverted port-1 byte: 255 (-1) / 0 / 1. */
+PADDIRX: PROCEDURE (P) BYTE;
+DECLARE P BYTE;
+DECLARE J BYTE;
+IF (P AND PADLEFT) <> 0 THEN DO;
+J = 255;
+END;
+ELSE DO;
+IF (P AND PADRIGHT) <> 0 THEN J = 1;
+ELSE J = 0;
+END;
+RETURN J;
+END PADDIRX;
+
+/* Y direction from an inverted port-1 byte: 255 (-1) / 0 / 1. */
+PADDIRY: PROCEDURE (P) BYTE;
+DECLARE P BYTE;
+DECLARE J BYTE;
+IF (P AND PADUP) <> 0 THEN DO;
+J = 255;
+END;
+ELSE DO;
+IF (P AND PADDOWN) <> 0 THEN J = 1;
+ELSE J = 0;
+END;
+RETURN J;
+END PADDIRY;
+
+/* Poll port 1 once: shift CUR to PREV, read new CUR, derive JUST bits
+   (pressed now, released before) without XOR/NOT, via the mask table. */
+PADPOLL1: PROCEDURE;
+DECLARE K ADDRESS;
+DECLARE J BYTE;
+PADPREV1 = PADCUR1;
+PADCUR1 = PADREAD1;
+J = 0;
+K = 0;
+DO WHILE K <> 6;
+IF (PADCUR1 AND PADMSKS(K)) <> 0 THEN DO;
+IF (PADPREV1 AND PADMSKS(K)) = 0 THEN J = J + PADMSKS(K);
+END;
+K = K + 1;
+END;
+PADJUST1 = J;
+END PADPOLL1;
